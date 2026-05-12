@@ -20,6 +20,8 @@ const PDFS = [
 
 let chunks = [];
 
+console.log("Chunks:", chunks.length);
+
 // jednoduché dělení textu
 function splitText(text, size = 1000) {
   const result = [];
@@ -154,15 +156,17 @@ Odpovědi formuluj stručně a cituj jen informace z textu.
 }
 
 app.post("/api/chat", async (req, res) => {
-  const { message } = req.body;
+  try {
 
-  const relevant = await getRelevantChunks(message, 4);
+    const { message } = req.body;
 
-  const context = relevant
-    .map(r => r.text)
-    .join("\n\n");
+    const relevant = await getRelevantChunks(message, 4);
 
-  const prompt = `
+    const context = relevant
+      .map(r => r.text)
+      .join("\n\n");
+
+    const prompt = `
 DOKUMENTACE:
 ${context}
 
@@ -170,14 +174,23 @@ DOTAZ:
 ${message}
 `;
 
-  const answer = await askAI(prompt);
+    const answer = await askAI(prompt);
 
-  const sources = [...new Set(relevant.map(r => r.source))];
+    const sources = [...new Set(relevant.map(r => r.source))];
 
-  res.json({
-    answer,
-    sources
-  });
+    res.json({
+      answer,
+      sources
+    });
+
+  } catch (err) {
+    console.error("❌ /api/chat error:", err);
+
+    res.status(500).json({
+      answer: "Nastala chyba při zpracování dotazu.",
+      error: err.message
+    });
+  }
 });
 app.listen(process.env.PORT || 3000, () => {
   console.log("Server běží");
