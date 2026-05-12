@@ -13,8 +13,8 @@ app.use(express.static("public"));
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 const PDFS = [
-  "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-zalohy.pdf",
-  "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-vodne-a-stocne.pdf"
+  "https://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-zalohy.pdf",
+  "https://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-vodne-a-stocne.pdf"
 ];
 
 let chunks = [];
@@ -38,6 +38,20 @@ function cosine(a, b) {
   }
 
   return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+async function downloadPDF(url, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await axios.get(url, {
+        responseType: "arraybuffer",
+        timeout: 30000
+      });
+    } catch (err) {
+      console.log(`Retry ${i + 1} failed`);
+      if (i === retries - 1) throw err;
+    }
+  }
 }
 
 // načtení PDF
