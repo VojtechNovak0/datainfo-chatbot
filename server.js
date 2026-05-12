@@ -1,6 +1,9 @@
 const express = require("express");
 const axios = require("axios");
 const pdfParse = require("pdf-parse");
+const { pipeline } = require("@xenova/transformers");
+
+let embedder;
 
 require("dotenv").config();
 const app = express();
@@ -25,6 +28,18 @@ function splitText(text, size = 1000) {
   return result;
 }
 
+function cosine(a, b) {
+  let dot = 0, magA = 0, magB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
 // načtení PDF
 async function loadDocs() {
 
@@ -35,51 +50,46 @@ async function loadDocs() {
     });
 
     const data = await pdfParse(res.data);
-
-    const splitChunks = splitText(data.text);
+    const splitChunks = splitText(data.text, 400); // menší chunk = lepší výsledky
 
     for (const chunk of splitChunks) {
 
+      const vector = await embed(chunk);
+
       chunks.push({
         text: chunk,
-        source: url
+        source: url,
+        embedding: vector
       });
 
     }
 
   }
 
-  console.log("📄 Dokumenty načteny");
+  console.log("📄 Dokumenty načteny + embeddings hotové");
 }
 
 // jednoduché skórování relevance
-function getRelevantChunks(query, top = 4) {
+async function getRelevantChunks(query, top = 4) {
 
-  const words = query.toLowerCase().split(" ");
+  const queryVector = await embed(query);
 
   return chunks
-    .map(item => {
-
-      let score = 0;
-
-      for (const word of words) {
-
-        if (item.text.toLowerCase().includes(word)) {
-          score++;
-        }
-
-      }
-
-      return {
-        text: item.text,
-        source: item.source,
-        score
-      };
-
-    })
+    .map(c => ({
+      ...c,
+      score: cosine(queryVector, c.embedding)
+    }))
     .sort((a, b) => b.score - a.score)
     .slice(0, top);
+}
 
+async function embed(text) {
+  const output = await embedder(text, {
+    pooling: "mean",
+    normalize: true
+  });
+
+  return Array.from(output.data);
 }
 
 // volání Groq API
@@ -95,7 +105,7 @@ async function askAI(prompt) {
           {
             role: "system",
             content:
-              "Odpovídej pouze z dokumentace. Pokud odpověď neznáš, napiš: Tohle v dokumentaci nemám."
+              "Odpovídej výhradně z poskytnutého kontextu. Pokud v kontextu není odpověď, řekni: "V dokumentech jsem to nenašel." Odpovědi formuluj stručně a cituj jen informace z textu."
           },
           {
             role: "user",
@@ -131,11 +141,11 @@ async function askAI(prompt) {
 app.post("/api/chat", async (req, res) => {
   const { message } = req.body;
 
-  const relevant = getRelevantChunks(message, 4);
+  const relevant = await getRelevantChunks(message, 4);
 
   const context = relevant
-     .map(r => r.text)
-     .join("\n\n");
+    .map(r => r.text)
+    .join("\n\n");
 
   const prompt = `
 DOKUMENTACE:
@@ -147,16 +157,19 @@ ${message}
 
   const answer = await askAI(prompt);
 
-  const sources = [...new Set(
-    relevant.map(r => r.source)
-  )];
+  const sources = [...new Set(relevant.map(r => r.source))];
 
   res.json({
-     answer,
-     sources
+    answer,
+    sources
   });
 });
-app.listen(3000, async () => {
+app.listen(process.env.PORT || 3000, async () => {
+  embedder = await pipeline(
+    "feature-extraction",
+    "Xenova/all-MiniLM-L6-v2"
+  );
+
   await loadDocs();
   console.log("Server běží na http://localhost:3000");
 });
