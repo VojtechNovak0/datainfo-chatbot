@@ -104,8 +104,11 @@ async function askAI(prompt) {
         messages: [
           {
             role: "system",
-            content:
-              "Odpovídej výhradně z poskytnutého kontextu. Pokud v kontextu není odpověď, řekni: "V dokumentech jsem to nenašel." Odpovědi formuluj stručně a cituj jen informace z textu."
+            content: `
+Odpovídej výhradně z poskytnutého kontextu.
+Pokud v kontextu není odpověď, řekni: "V dokumentech jsem to nenašel."
+Odpovědi formuluj stručně a cituj jen informace z textu.
+`
           },
           {
             role: "user",
