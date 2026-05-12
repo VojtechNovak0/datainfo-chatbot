@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="UTF-8" />
+  <title>Datainfo AI</title>
+
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+
+  <div id="chat-toggle">
+    💬
+  </div>
+
+  <div id="chat-window">
+
+    <div id="chat-header">
+      Datainfo AI
+    </div>
+
+    <div id="chat"></div>
+
+    <div id="input-area">
+
+      <input
+        id="msg"
+        placeholder="Napište dotaz..."
+      />
+
+      <button id="send-btn" onclick="send()">
+        Odeslat
+      </button>
+
+    </div>
+
+  </div>
+
+  <script>
+
+    const toggle = document.getElementById("chat-toggle");
+    const windowEl = document.getElementById("chat-window");
+    const input = document.getElementById("msg");
+    const chat = document.getElementById("chat");
+
+    // otevření / zavření chatu
+    toggle.onclick = () => {
+
+      if (windowEl.style.display === "flex") {
+        windowEl.style.display = "none";
+      } else {
+        windowEl.style.display = "flex";
+      }
+
+    };
+
+    // Enter = odeslat
+    input.addEventListener("keydown", function (event) {
+
+      if (event.key === "Enter") {
+        send();
+      }
+
+    });
+
+    async function send() {
+
+      // prázdná zpráva
+      if (!input.value.trim()) return;
+
+      const userMessage = input.value;
+
+      // zpráva uživatele
+      chat.innerHTML += `
+        <div class="user-message">
+          ${userMessage}
+        </div>
+      `;
+
+      input.value = "";
+
+      chat.scrollTop = chat.scrollHeight;
+
+      try {
+
+        // loading zpráva
+        const loadingId = "loading-" + Date.now();
+
+        chat.innerHTML += `
+          <div class="ai-message" id="${loadingId}">
+            Přemýšlím...
+          </div>
+        `;
+
+        chat.scrollTop = chat.scrollHeight;
+
+        // request na backend
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            message: userMessage
+          })
+        });
+
+        const data = await res.json();
+
+        // zdroje
+        let sourcesHtml = "";
+
+        if (data.sources && data.sources.length > 0) {
+
+          sourcesHtml = `
+            <br><br>
+
+            <b>Zdroje:</b>
+
+            <ul>
+              ${data.sources.map(source => `
+                <li>
+                  <a href="${source}" target="_blank">
+                    ${source.split("/").pop()}
+                  </a>
+                </li>
+              `).join("")}
+            </ul>
+          `;
+        }
+
+        // nahrazení loading zprávy
+        document.getElementById(loadingId).innerHTML = `
+          ${data.answer}
+          ${sourcesHtml}
+        `;
+
+        chat.scrollTop = chat.scrollHeight;
+
+      } catch (err) {
+
+        console.error(err);
+
+        chat.innerHTML += `
+          <div class="ai-message">
+            Nastala chyba při komunikaci se serverem.
+          </div>
+        `;
+
+      }
+
+    }
+
+  </script>
+
+</body>
+
+</html>
