@@ -98,6 +98,11 @@ async function getRelevantChunks(query, top = 4) {
 }
 
 async function embed(text) {
+
+  if (!embedder) {
+    throw new Error("Embedder ještě není inicializovaný");
+  }
+
   const output = await embedder(text, {
     pooling: "mean",
     normalize: true
@@ -192,10 +197,14 @@ ${message}
     });
   }
 });
-app.listen(process.env.PORT || 3000, () => {
-  console.log("Server běží");
+app.listen(process.env.PORT || 3000, async () => {
 
-  loadDocs().catch(err => {
-    console.error("PDF load failed:", err.message);
-  });
+  embedder = await pipeline(
+    "feature-extraction",
+    "Xenova/all-MiniLM-L6-v2"
+  );
+
+  await loadDocs();
+
+  console.log("Server běží");
 });
