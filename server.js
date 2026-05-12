@@ -1,6 +1,7 @@
 const express = require("express");
 const axios = require("axios");
 const pdfParse = require("pdf-parse");
+const fs = require("fs");
 const { pipeline } = require("@xenova/transformers");
 
 let embedder;
