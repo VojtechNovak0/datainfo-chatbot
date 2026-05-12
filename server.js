@@ -60,27 +60,30 @@ async function downloadPDF(url, retries = 3) {
 // načtení PDF
 async function loadDocs() {
 
-  const files = [
-    "./docs/Datainfo-Jak-na-zalohy.pdf",
-    "./docs/Datainfo-Jak-na-vodne-a-stocne.pdf"
-  ];
+  chunks = []; // reset
 
-  for (const filePath of files) {
+  for (const file of files) {
 
-    const dataBuffer = fs.readFileSync(filePath);
-    const data = await pdfParse(dataBuffer);
+    console.log("Loading:", file);
+
+    const buffer = fs.readFileSync(file);
+    const data = await pdfParse(buffer);
+
+    console.log("Text length:", data.text.length);
 
     const splitChunks = splitText(data.text, 400);
+
+    console.log("Chunks:", splitChunks.length);
 
     for (const chunk of splitChunks) {
       chunks.push({
         text: chunk,
-        source: filePath
+        source: file
       });
     }
   }
 
-  console.log("📄 PDF načteny z lokálních souborů");
+  console.log("TOTAL chunks:", chunks.length);
 }
 
 // jednoduché skórování relevance
