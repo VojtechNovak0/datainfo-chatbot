@@ -57,30 +57,27 @@ async function downloadPDF(url, retries = 3) {
 // načtení PDF
 async function loadDocs() {
 
-  for (const url of PDFS) {
+  const files = [
+    "./docs/Datainfo-Jak-na-zalohy.pdf",
+    "./docs/Datainfo-Jak-na-vodne-a-stocne.pdf"
+  ];
 
-    const res = await axios.get(url, {
-      responseType: "arraybuffer"
-    });
+  for (const filePath of files) {
 
-    const data = await pdfParse(res.data);
-    const splitChunks = splitText(data.text, 400); // menší chunk = lepší výsledky
+    const dataBuffer = fs.readFileSync(filePath);
+    const data = await pdfParse(dataBuffer);
+
+    const splitChunks = splitText(data.text, 400);
 
     for (const chunk of splitChunks) {
-
-      const vector = await embed(chunk);
-
       chunks.push({
         text: chunk,
-        source: url,
-        embedding: vector
+        source: filePath
       });
-
     }
-
   }
 
-  console.log("📄 Dokumenty načteny + embeddings hotové");
+  console.log("📄 PDF načteny z lokálních souborů");
 }
 
 // jednoduché skórování relevance
@@ -181,12 +178,10 @@ ${message}
     sources
   });
 });
-app.listen(process.env.PORT || 3000, async () => {
-  embedder = await pipeline(
-    "feature-extraction",
-    "Xenova/all-MiniLM-L6-v2"
-  );
+app.listen(process.env.PORT || 3000, () => {
+  console.log("Server běží");
 
-  await loadDocs();
-  console.log("Server běží na http://localhost:3000");
+  loadDocs().catch(err => {
+    console.error("PDF load failed:", err.message);
+  });
 });
