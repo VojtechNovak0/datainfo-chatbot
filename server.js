@@ -246,14 +246,12 @@ async function startServer() {
     "Xenova/all-MiniLM-L6-v2"
   );
 
-  await loadDocs(); // 🔥 nejdřív data
-
-  console.log("📄 PDF načteny");
-  
   const PORT = process.env.PORT || 3000;
   
   app.listen(PORT, () => {
     console.log(`Server běží na portu ${PORT}`);
+    await loadDocs(); // 🔥 nejdřív data
+    console.log("📄 PDF načteny");
   });
 }
 
