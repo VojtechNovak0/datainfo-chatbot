@@ -1,13 +1,15 @@
 const express = require("express");
 const axios = require("axios");
 const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
-const fs = require("fs");
 require("dotenv").config();
 const { pipeline } = require("@xenova/transformers");
 const cheerio = require("cheerio");
+const fs = require("fs");
+
+const CACHE_FILE = "./webIndex.json";
 
 const BASE_URL = "https://help.datainfo.cz";
-const MAX_PAGES = 30;
+const MAX_PAGES = 20;
 
 let webIndex = [];
 let visited = new Set();
@@ -283,12 +285,52 @@ async function crawl(url) {
 }
 
 async function loadWebKnowledge() {
+
+  // ===============================
+  // 1️. ZKONTROLUJ CACHE
+  // ===============================
+  if (fs.existsSync(CACHE_FILE)) {
+
+    console.log("📦 Loading webIndex from cache...");
+
+    try {
+      const raw = fs.readFileSync(CACHE_FILE, "utf-8");
+      webIndex = JSON.parse(raw);
+
+      console.log("✅ Cache loaded:", webIndex.length);
+      return;
+
+    } catch (err) {
+      console.log("⚠️ Cache corrupted → rebuilding...");
+    }
+  }
+
+  // ===============================
+  // 2️. KDYŽ CACHE NEEXISTUJE → CRAWL
+  // ===============================
+  console.log("🌐 No cache → starting crawl...");
+
   webIndex = [];
   visited.clear();
 
   await crawl(BASE_URL);
 
-  console.log("WEB INDEX READY:", webIndex.length);
+  console.log("✅ WEB INDEX READY:", webIndex.length);
+
+  // ===============================
+  // 3️. ULOŽ CACHE
+  // ===============================
+  try {
+    fs.writeFileSync(
+      CACHE_FILE,
+      JSON.stringify(webIndex, null, 2)
+    );
+
+    console.log("💾 Cache saved to webIndex.json");
+
+  } catch (err) {
+    console.log("❌ Failed to save cache:", err);
+  }
 }
 
 async function classifyIntent(message) {
