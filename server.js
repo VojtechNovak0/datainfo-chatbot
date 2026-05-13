@@ -421,21 +421,34 @@ Dotaz: ${message}
 // ---------------- START ----------------
 async function startServer() {
 
-  embedder = await pipeline(
-    "feature-extraction",
-    "Xenova/all-MiniLM-L6-v2"
-  );
-
   const PORT = process.env.PORT || 3000;
-  
-  (async () => {
-     await loadDocs();
-     await loadWebKnowledge();
 
-     app.listen(PORT, () => {
-        console.log("Server ready");
-     });
-  })();
+  // ✅ PORT OTEVŘÍT HNED
+  app.listen(PORT, () => {
+    console.log("Server running on port", PORT);
+  });
+
+  // ✅ načítání na pozadí
+  try {
+
+    console.log("Loading embedder...");
+
+    embedder = await pipeline(
+      "feature-extraction",
+      "Xenova/all-MiniLM-L6-v2"
+    );
+
+    console.log("Loading PDFs...");
+    await loadDocs();
+
+    console.log("Loading web knowledge...");
+    await loadWebKnowledge();
+
+    console.log("AI READY");
+
+  } catch (err) {
+    console.error("Startup error:", err);
+  }
 }
 
 startServer();
