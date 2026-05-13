@@ -173,6 +173,9 @@ TVÉ ÚKOLY:
 - nikdy nevracej jen číslo bodu (např. "bod 11")
 - pokud najdeš relevantní sekci, ROZVEĎ ji do kroků
 - spoj více vět z kontextu do smysluplného postupu
+- nepoužívej technické konfigurace, IP adresy, databáze ani interní serverové údaje pokud nejsou nutné pro běžného uživatele
+- ignoruj interní nastavení aplikace
+- odpovídej pouze informacemi relevantními pro běžného uživatele
 - odpověď má být 3–6 vět
 - pokud je to postup, napiš ho jako kroky
 - můžeš použít více částí textu z různých chunků
@@ -288,12 +291,84 @@ async function loadWebKnowledge() {
   console.log("WEB INDEX READY:", webIndex.length);
 }
 
+async function classifyIntent(message) {
+
+  const res = await axios.post(
+    "https://api.groq.com/openai/v1/chat/completions",
+    {
+      model: "llama-3.1-8b-instant",
+      messages: [
+        {
+          role: "system",
+          content: `
+Rozhodni typ zprávy.
+
+Možnosti:
+- SMALLTALK
+- DOCUMENT
+
+SMALLTALK:
+- pozdravy
+- běžná konverzace
+- poděkování
+- krátké lidské reakce
+- otázky typu "co ty"
+
+DOCUMENT:
+- otázky na dokumentaci
+- návody
+- postupy
+- technické dotazy
+
+Odpověz POUZE jedním slovem:
+SMALLTALK
+nebo
+DOCUMENT
+`
+        },
+        {
+          role: "user",
+          content: message
+        }
+      ],
+      temperature: 0
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+
+  return res.data.choices[0].message.content.trim();
+}
+
 // ---------------- API ----------------
 app.post("/api/chat", async (req, res) => {
   try {
 
     const message = req.body.message;
+    const intent = await classifyIntent(message);
+    console.log("INTENT:", intent);
     const lower = message.toLowerCase();
+
+       // 💬 SMALL TALK MODE
+    if (intent === "SMALLTALK") {
+
+       const answer = await askAI(`
+    Jsi přátelský AI chatbot.
+
+    Odpovídej krátce a přirozeně.
+
+    Zpráva:
+    ${message}
+    `);
+       return res.json({
+          answer,
+          sources: []
+       });
+    }
 
     // 1. krátké zprávy
     if (lower.length <= 1) {
@@ -302,7 +377,7 @@ app.post("/api/chat", async (req, res) => {
         sources: []
       });
     }
-
+    
     // 2. RAG (TOTO JE HLAVNÍ ČÁST)
     const relevant = await getRelevantChunks(message, 8);
 
