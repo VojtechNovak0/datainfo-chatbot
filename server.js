@@ -249,9 +249,11 @@ async function startServer() {
   await loadDocs(); // 🔥 nejdřív data
 
   console.log("📄 PDF načteny");
-
-  app.listen(3000, () => {
-    console.log("Server běží na portu 3000");
+  
+  const PORT = process.env.PORT || 3000;
+  
+  app.listen(PORT, () => {
+    console.log(`Server běží na portu ${PORT}`);
   });
 }
 
