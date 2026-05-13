@@ -2,14 +2,19 @@ const express = require("express");
 const axios = require("axios");
 const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 require("dotenv").config();
-const { pipeline } = require("@xenova/transformers");
 const cheerio = require("cheerio");
 const fs = require("fs");
 
 const CACHE_FILE = "./webIndex.json";
-
 const BASE_URL = "https://help.datainfo.cz";
 const MAX_PAGES = 20;
+
+let pipeline;
+
+async function loadEmbedder() {
+  const transformers = await import("@xenova/transformers");
+  pipeline = transformers.pipeline;
+}
 
 let webIndex = [];
 let visited = new Set();
@@ -465,15 +470,16 @@ async function startServer() {
 
   const PORT = process.env.PORT || 3000;
 
-  // ✅ PORT OTEVŘÍT HNED
   app.listen(PORT, () => {
     console.log("Server running on port", PORT);
   });
 
-  // ✅ načítání na pozadí
   try {
 
-    console.log("Loading embedder...");
+    console.log("Loading transformers...");
+    await loadEmbedder(); // ← DŮLEŽITÉ
+
+    console.log("Loading embedder model...");
 
     embedder = await pipeline(
       "feature-extraction",
@@ -489,7 +495,7 @@ async function startServer() {
     console.log("AI READY");
 
   } catch (err) {
-    console.error("Startup error:", err);
+    console.error(err);
   }
 }
 
