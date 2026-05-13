@@ -3,8 +3,14 @@ const axios = require("axios");
 const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 const fs = require("fs");
 require("dotenv").config();
-
 const { pipeline } = require("@xenova/transformers");
+const cheerio = require("cheerio");
+
+const BASE_URL = "https://help.datainfo.cz";
+const MAX_PAGES = 30;
+
+let webIndex = [];
+let visited = new Set();
 
 const app = express();
 app.use(express.json());
@@ -12,7 +18,7 @@ app.use(express.static("public"));
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
-const PDFS = [
+const files = [
   "./docs/Datainfo-Jak-na-zalohy.pdf",
   "./docs/Datainfo-Jak-na-vodne-a-stocne.pdf"
 ];
@@ -60,24 +66,66 @@ function splitText(text, size = 500, overlap = 100) {
   return chunks;
 }
 
+async function getRelevantChunks(query, topK = 8) {
+  const queryVector = await embed(query);
+
+  const scored = chunks.map(c => ({
+    text: c.text,
+    page: c.page,
+    source: c.source,
+    vector: c.vector,
+    score: cosine(queryVector, c.vector)
+  }));
+
+  return scored
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+}
+
+function normalize(text) {
+  return text
+    .toLowerCase()
+    .replace(/ě/g, "e")
+    .replace(/š/g, "s")
+    .replace(/č/g, "c")
+    .replace(/ř/g, "r")
+    .replace(/ž/g, "z")
+    .replace(/ý/g, "y")
+    .replace(/á/g, "a")
+    .replace(/í/g, "i")
+    .replace(/é/g, "e")
+    .replace(/ů/g, "u")
+    .replace(/ú/g, "u");
+}
+
 // ---------------- PDF LOADER (PAGE BASED) ----------------
 async function loadPDF(filePath) {
-  const data = new Uint8Array(fs.readFileSync(filePath));
-  const pdf = await pdfjsLib.getDocument(data).promise;
+
+  const data = new Uint8Array(
+    fs.readFileSync(filePath)
+  );
+
+  const pdf = await pdfjsLib
+    .getDocument({ data })
+    .promise;
 
   const pages = [];
 
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+
+    const page = await pdf.getPage(pageNum);
+
     const content = await page.getTextContent();
 
-    const text = content.items.map(i => i.str).join(" ");
+    const text = content.items
+      .map(item => item.str)
+      .join(" ");
 
     pages.push({
-      page: i,
       text,
-      source: filePath
+      page: pageNum
     });
+
   }
 
   return pages;
@@ -85,47 +133,28 @@ async function loadPDF(filePath) {
 
 // ---------------- LOAD DOCS ----------------
 async function loadDocs() {
-  chunks = [];
 
-  for (const file of PDFS) {
-    console.log("Loading:", file);
+  for (const file of files) {
 
     const pages = await loadPDF(file);
 
-    for (const p of pages) {
-      const blocks = splitText(p.text);
+    for (const pageData of pages) {
 
-     for (const block of blocks) {
+      const vector = await embed(pageData.text);
 
-       if (!block.trim()) continue;
+      chunks.push({
+        text: pageData.text,
+        source: file,
+        page: pageData.page,
+        vector
+      });
 
-       const vector = await embed(block);
-
-       chunks.push({
-          text: block,
-          page: p.page,
-          source: file,
-          embedding: vector
-       });
-     }
     }
+
   }
 
-  console.log("TOTAL CHUNKS:", chunks.length);
-}
+  console.log("PDF načteny:", chunks.length);
 
-// ---------------- SEARCH ----------------
-async function getRelevantChunks(query, top = 3) {
-  const queryVec = await embed(query);
-
-  return chunks
-    .map(c => ({
-      ...c,
-      score: cosine(queryVec, c.embedding)
-    }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, top)
-    .filter(c => c.score > 0.25);
 }
 
 // ---------------- GROQ ----------------
@@ -137,22 +166,34 @@ async function askAI(prompt) {
       messages: [
         {
           role: "system",
-          content: `
-Jsi chatbot odpovídající pouze pomocí citací z dokumentace.
+          content: `Jsi AI asistent pro vysvětlování dokumentace.
 
-Pravidla:
-- odpovídej POUZE přesnými větami přímo z PDF souborů
-- nic nepřepisuj vlastními slovy
-- nic neparafrázuj
-- necituj informace, které nejsou v kontextu
-- vždy uveď číslo strany
+TVÉ ÚKOLY:
+- odpovídej vysvětlením, ne citací bodů
+- nikdy nevracej jen číslo bodu (např. "bod 11")
+- pokud najdeš relevantní sekci, ROZVEĎ ji do kroků
+- spoj více vět z kontextu do smysluplného postupu
+- odpověď má být 3–6 vět
+- pokud je to postup, napiš ho jako kroky
+- můžeš použít více částí textu z různých chunků
+- ignoruj nadpisy jako hlavní odpověď
+POKUD ODPOVĚĎ OBSAHUJE POSTUP:
+- piš ho jako očíslované kroky
+- každý krok na nový řádek
+- začínej číslem (1., 2., 3.)
+- nepoužívej dlouhé odstavce pro postupy
 
-Formát odpovědi:
+NEVRACEJ:
+- "nachází se v bodě X"
+- "bod X říká X"
 
-"CITACE Z DOKUMENTU" (strana X)
+MÍSTO TOHO:
+- vysvětli co má uživatel udělat
+- popiš postup
+- dej kontext
 
-Pokud odpověď v kontextu není:
-"V dokumentech jsem to nenašel."
+Pokud odpověď není v dokumentaci:
+"Nenašel jsem to v dokumentaci."
 `
         },
         { role: "user", content: prompt }
@@ -170,71 +211,135 @@ Pokud odpověď v kontextu není:
   return res.data.choices[0].message.content;
 }
 
+async function fetchPage(url) {
+  const res = await fetch(url);
+  const html = await res.text();
+
+  const $ = cheerio.load(html);
+
+  $("script, style, nav, footer, header, noscript").remove();
+
+  const text = $("body").text().replace(/\s+/g, " ").trim();
+
+  return text;
+}
+
+function extractLinks($) {
+  return $("a")
+    .map((i, el) => $(el).attr("href"))
+    .get()
+    .filter(Boolean)
+    .map(href => href.startsWith("http") ? href : BASE_URL + href)
+    .filter(url => url.includes("help.datainfo.cz"));
+}
+
+function splitText(text, size = 800) {
+  const chunks = [];
+
+  for (let i = 0; i < text.length; i += size) {
+    chunks.push(text.slice(i, i + size));
+  }
+
+  return chunks;
+}
+
+async function crawl(url) {
+  if (visited.has(url)) return;
+  if (visited.size >= MAX_PAGES) return;
+
+  visited.add(url);
+
+  try {
+    const res = await fetch(url);
+    const html = await res.text();
+
+    const $ = cheerio.load(html);
+
+    $("script, style, nav, footer, header, noscript").remove();
+
+    const text = $("body").text().replace(/\s+/g, " ").trim();
+
+    const chunks = splitText(text, 800);
+
+    for (const c of chunks) {
+      webIndex.push({
+        text: c,
+        url
+      });
+    }
+
+    const links = extractLinks($);
+
+    for (const link of links.slice(0, 10)) {
+      await crawl(link);
+    }
+
+  } catch (e) {
+    console.log("crawl error:", url);
+  }
+}
+
+async function loadWebKnowledge() {
+  webIndex = [];
+  visited.clear();
+
+  await crawl(BASE_URL);
+
+  console.log("WEB INDEX READY:", webIndex.length);
+}
+
 // ---------------- API ----------------
 app.post("/api/chat", async (req, res) => {
   try {
 
-    console.log("➡️ NEW REQUEST:", req.body.message);
-
     const message = req.body.message;
-    
     const lower = message.toLowerCase();
 
-    if (
-       lower.includes("děkuji") ||
-       lower.includes("díky")
-    ) {
-       return res.json({
-          answer: "Rádo se stalo 🙂",
-          sources: []
-       });
+    // 1. krátké zprávy
+    if (lower.length <= 1) {
+      return res.json({
+        answer: "Prosím napište konkrétní dotaz 🙂",
+        sources: []
+      });
     }
 
-    if (
-       lower.includes("super") ||
-       lower.includes("perfektní") ||
-       lower.includes("skvělé")
-    ) {
-       return res.json({
-          answer: "Jsem rád, že to pomohlo 🙂",
-          sources: []
-       });
+    // 2. RAG (TOTO JE HLAVNÍ ČÁST)
+    const relevant = await getRelevantChunks(message, 8);
+
+    console.log("===== TOP CHUNKS =====");
+
+    relevant.forEach((r, i) => {
+      console.log(i, "score:", r.score);
+      console.log(r.text.slice(0, 150));
+    });
+
+    // 3. fallback
+    if (!relevant.length || relevant[0].score < 0.25) {
+      return res.json({
+        answer: "V dokumentaci jsem k tomuto dotazu nenašel přesné informace.",
+        sources: []
+      });
     }
 
-    if (
-       lower.includes("ahoj") ||
-       lower.includes("čau") ||
-       lower.includes("čus")
-    ) {
-       return res.json({
-          answer: "Ahoj 👋",
-          sources: []
-       });
-    }
-    
-    const relevant = await getRelevantChunks(message, 3);
-
+    // 4. context
     const context = relevant
       .map(r => `${r.text} (strana ${r.page})`)
       .join("\n\n");
 
+    // 5. AI
     const answer = await askAI(`
-DOKUMENTACE:
+Použij pouze tento kontext:
+
 ${context}
 
-DOTAZ:
-${message}
+Dotaz: ${message}
 `);
 
-    res.json({ answer });
+    return res.json({ answer });
 
   } catch (err) {
-    console.error("❌ BACKEND ERROR:", err);
-    console.error(err.stack);
-
-    res.status(500).json({
-      error: err.message
-    });
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -248,11 +353,14 @@ async function startServer() {
 
   const PORT = process.env.PORT || 3000;
   
-  app.listen(PORT, () => {
-    console.log(`Server běží na portu ${PORT}`);
-    await loadDocs(); // 🔥 nejdřív data
-    console.log("📄 PDF načteny");
-  });
+  (async () => {
+     await loadDocs();
+     await loadWebKnowledge();
+
+     app.listen(PORT, () => {
+        console.log("Server ready");
+     });
+  })();
 }
 
 startServer();

@@ -15,10 +15,17 @@
   </div>
 
   <div id="chat-window">
+     <div id="chat-topbar">
 
-    <div id="chat-header">
-      Datainfo AI
-    </div>
+       <div>
+         Datainfo AI
+       </div>
+
+       <button id="close-chat">
+           ✕
+       </button>
+
+     </div>
 
     <div id="chat"></div>
 
@@ -38,18 +45,22 @@
   </div>
 
   <script>
+    window.addEventListener("load", () => {
+       const toggle = document.getElementById("chat-toggle");
+       const windowEl = document.getElementById("chat-window");
+       const closeBtn = document.getElementById("close-chat");
+       toggle.addEventListener("click", () => {
+          windowEl.classList.add("open");
+          document.body.classList.add("chat-open");
+       });
+       closeBtn.addEventListener("click", () => {
+          windowEl.classList.remove("open");
+          document.body.classList.remove("chat-open");
+       });
+    });
 
-    const toggle = document.getElementById("chat-toggle");
-    const windowEl = document.getElementById("chat-window");
     const input = document.getElementById("msg");
     const chat = document.getElementById("chat");
-
-    // otevření / zavření chatu
-    toggle.onclick = () => {
-
-     window.location.href = "/chat.html";
-
-    };
 
     // Enter = odeslat
     input.addEventListener("keydown", function (event) {
@@ -128,8 +139,10 @@
 
         // nahrazení loading zprávy
         document.getElementById(loadingId).innerHTML = `
-          ${data.answer}
-          ${sourcesHtml}
+           <div class="ai-text">
+              ${data.answer.replace(/\n/g, "<br>")}
+           </div>
+           ${sourcesHtml}
         `;
 
         chat.scrollTop = chat.scrollHeight;
