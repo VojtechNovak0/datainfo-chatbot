@@ -5,15 +5,33 @@ require("dotenv").config();
 const cheerio = require("cheerio");
 const fs = require("fs");
 
-const CACHE_FILE = "./webIndex.json";
+const pdfUrls = [
+  "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-vodne-a-stocne.pdf",
+  "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-zalohy.pdf"
+];
+
+const WEB_CACHE_FILE = "./webIndex.json";
+const PDF_CACHE_FILE = "./pdfIndex.json";
 const BASE_URL = "https://help.datainfo.cz";
 const MAX_PAGES = 20;
-
+let discoveredPDFs = new Set();
 let pipeline;
 
 async function loadEmbedder() {
   const transformers = await import("@xenova/transformers");
   pipeline = transformers.pipeline;
+}
+
+function loadJson(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function saveJson(file, data) {
+  fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
 let webIndex = [];
@@ -24,11 +42,6 @@ app.use(express.json());
 app.use(express.static("public"));
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-
-const files = [
-  "./docs/Datainfo-Jak-na-zalohy.pdf",
-  "./docs/Datainfo-Jak-na-vodne-a-stocne.pdf"
-];
 
 let chunks = [];
 let embedder;
@@ -73,22 +86,6 @@ function splitText(text, size = 500, overlap = 100) {
   return chunks;
 }
 
-async function getRelevantChunks(query, topK = 8) {
-  const queryVector = await embed(query);
-
-  const scored = chunks.map(c => ({
-    text: c.text,
-    page: c.page,
-    source: c.source,
-    vector: c.vector,
-    score: cosine(queryVector, c.vector)
-  }));
-
-  return scored
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
-}
-
 function normalize(text) {
   return text
     .toLowerCase()
@@ -105,12 +102,66 @@ function normalize(text) {
     .replace(/ú/g, "u");
 }
 
-// ---------------- PDF LOADER (PAGE BASED) ----------------
-async function loadPDF(filePath) {
+function score(text, query) {
 
-  const data = new Uint8Array(
-    fs.readFileSync(filePath)
-  );
+  const t = normalize(text);
+  const q = normalize(query);
+
+  let score = 0;
+
+  const queryWords = q
+    .split(/\s+/)
+    .filter(w => w.length > 2);
+
+  for (const word of queryWords) {
+
+    // přesná shoda
+    if (t.includes(word)) {
+      score += 3;
+    }
+
+    // částečná shoda
+    if (
+      word.length >= 4 &&
+      t.includes(word.slice(0, 4))
+    ) {
+      score += 1;
+    }
+
+  }
+
+  // bonus za celou frázi
+  if (t.includes(q)) {
+    score += 10;
+  }
+
+  return score;
+}
+
+function cleanContext(text) {
+  return text
+    .replace(/311XXX/g, "")
+    .replace(/Systém integrované platební operace/g, "SIPO");
+}
+
+function getRelevantChunks(query, topK = 8) {
+  return chunks
+    .map(c => ({
+      ...c,
+      score: score(c.text, query)
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
+}
+
+// ---------------- PDF LOADER (PAGE BASED) ----------------
+async function loadPDF(url) {
+
+  const response = await axios.get(url, {
+    responseType: "arraybuffer"
+  });
+
+  const data = new Uint8Array(response.data);
 
   const pdf = await pdfjsLib
     .getDocument({ data })
@@ -132,7 +183,6 @@ async function loadPDF(filePath) {
       text,
       page: pageNum
     });
-
   }
 
   return pages;
@@ -141,27 +191,48 @@ async function loadPDF(filePath) {
 // ---------------- LOAD DOCS ----------------
 async function loadDocs() {
 
-  for (const file of files) {
+  console.log("📄 Loading PDFs...");
 
-    const pages = await loadPDF(file);
+  const cached = loadJson(PDF_CACHE_FILE);
 
-    for (const pageData of pages) {
-
-      const vector = await embed(pageData.text);
-
-      chunks.push({
-        text: pageData.text,
-        source: file,
-        page: pageData.page,
-        vector
-      });
-
-    }
-
+  if (cached) {
+    chunks = cached;
+    console.log("📦 PDF CACHE LOADED:", chunks.length);
+    return;
   }
 
-  console.log("PDF načteny:", chunks.length);
+  const tempChunks = [];
 
+  for (const url of pdfUrls) {
+
+    try {
+
+      console.log("⬇️ Downloading:", url);
+
+      const pages = await loadPDF(url);
+
+      for (const pageData of pages) {
+
+        tempChunks.push({
+          text: pageData.text,
+          source: url,
+          page: pageData.page
+        });
+
+      }
+
+      console.log("✅ PDF indexed:", url);
+
+    } catch (err) {
+      console.log("❌ PDF ERROR:", url);
+    }
+  }
+
+  chunks = tempChunks;
+
+  saveJson(PDF_CACHE_FILE, chunks);
+
+  console.log("💾 PDF CACHE SAVED:", chunks.length);
 }
 
 // ---------------- GROQ ----------------
@@ -175,35 +246,60 @@ async function askAI(prompt) {
           role: "system",
           content: `Jsi AI asistent pro vysvětlování dokumentace.
 
-TVÉ ÚKOLY:
-- odpovídej vysvětlením, ne citací bodů
-- nikdy nevracej jen číslo bodu (např. "bod 11")
-- pokud najdeš relevantní sekci, ROZVEĎ ji do kroků
-- spoj více vět z kontextu do smysluplného postupu
-- nepoužívej technické konfigurace, IP adresy, databáze ani interní serverové údaje pokud nejsou nutné pro běžného uživatele
-- ignoruj interní nastavení aplikace
-- odpovídej pouze informacemi relevantními pro běžného uživatele
-- odpověď má být 3–6 vět
-- pokud je to postup, napiš ho jako kroky
-- můžeš použít více částí textu z různých chunků
-- ignoruj nadpisy jako hlavní odpověď
-POKUD ODPOVĚĎ OBSAHUJE POSTUP:
-- piš ho jako očíslované kroky
-- každý krok na nový řádek
-- začínej číslem (1., 2., 3.)
-- nepoužívej dlouhé odstavce pro postupy
+========================
+ZÁKLADNÍ PRAVIDLA
+========================
 
-NEVRACEJ:
-- "nachází se v bodě X"
-- "bod X říká X"
+- odpovídej jasně a lidsky, ne citací bodů
+- pokud najdeš relevantní sekci, vysvětli ji jako postup
+- nikdy nevracej jen číslo bodu nebo název sekce
+- ignoruj nadpisy jako odpověď
 
-MÍSTO TOHO:
-- vysvětli co má uživatel udělat
-- popiš postup
-- dej kontext
+========================
+FORMÁT ODPOVĚDI
+========================
 
-Pokud odpověď není v dokumentaci:
-"Nenašel jsem to v dokumentaci."
+Pokud jde o postup:
+
+1. krátké vysvětlení (max 1–2 věty)
+2. kroky (max 5)
+3. žádné opakování informací
+
+Každý krok musí být na nový řádek a začínat číslem.
+
+========================
+ZÁKAZ OBSAHU
+========================
+
+Nikdy nezobrazuj:
+- názvy sekcí
+- názvy kapitol
+- účetní účty (např. 311XXX)
+- interní systémové kódy
+- databázová ID
+- IP adresy
+- technické implementační detaily
+
+Pokud se objeví v kontextu:
+→ úplně je ignoruj
+→ nevysvětluj je
+→ nepoužívej je v odpovědi
+
+========================
+LOGIKA ODPOVĚDI
+========================
+
+- odpověď musí být pouze z poskytnutého kontextu
+- pokud informace chybí:
+  "Nenašel jsem to v dokumentaci."
+
+========================
+ZÁKAZ DUPLIKACE
+========================
+
+- nikdy neopakuj stejnou informaci
+- žádné dvojité postupy
+- žádné redundantní věty
 `
         },
         { role: "user", content: prompt }
@@ -235,12 +331,37 @@ async function fetchPage(url) {
 }
 
 function extractLinks($) {
-  return $("a")
+
+  const links = $("a")
     .map((i, el) => $(el).attr("href"))
     .get()
     .filter(Boolean)
-    .map(href => href.startsWith("http") ? href : BASE_URL + href)
-    .filter(url => url.includes("help.datainfo.cz"));
+    .map(href => {
+
+      if (href.startsWith("http")) {
+        return href;
+      }
+
+      return BASE_URL + href;
+    });
+
+  // PDF detekce
+  links.forEach(link => {
+
+    if (link.toLowerCase().includes(".pdf")) {
+
+      discoveredPDFs.add(link);
+
+      console.log("📄 PDF FOUND:", link);
+    }
+
+  });
+
+  // jen interní odkazy
+  return links.filter(link =>
+    link.includes("help.datainfo.cz") ||
+    link.includes(".pdf")
+  );
 }
 
 function splitText(text, size = 800) {
@@ -264,6 +385,16 @@ async function crawl(url) {
     const html = await res.text();
 
     const $ = cheerio.load(html);
+         // PDF regex detection
+    const pdfMatches = html.match(/https?:\/\/[^"' ]+\.pdf/gi) || [];
+
+    pdfMatches.forEach(pdf => {
+
+       discoveredPDFs.add(pdf);
+
+       console.log("📄 PDF FOUND:", pdf);
+
+    });
 
     $("script, style, nav, footer, header, noscript").remove();
 
@@ -291,51 +422,22 @@ async function crawl(url) {
 
 async function loadWebKnowledge() {
 
-  // ===============================
-  // 1️. ZKONTROLUJ CACHE
-  // ===============================
-  if (fs.existsSync(CACHE_FILE)) {
+  const cached = loadJson(WEB_CACHE_FILE);
 
-    console.log("📦 Loading webIndex from cache...");
-
-    try {
-      const raw = fs.readFileSync(CACHE_FILE, "utf-8");
-      webIndex = JSON.parse(raw);
-
-      console.log("✅ Cache loaded:", webIndex.length);
-      return;
-
-    } catch (err) {
-      console.log("⚠️ Cache corrupted → rebuilding...");
-    }
+  if (cached) {
+    webIndex = cached;
+    console.log("📦 WEB CACHE LOADED:", webIndex.length);
+    return;
   }
-
-  // ===============================
-  // 2️. KDYŽ CACHE NEEXISTUJE → CRAWL
-  // ===============================
-  console.log("🌐 No cache → starting crawl...");
 
   webIndex = [];
   visited.clear();
 
   await crawl(BASE_URL);
 
-  console.log("✅ WEB INDEX READY:", webIndex.length);
+  saveJson(WEB_CACHE_FILE, webIndex);
 
-  // ===============================
-  // 3️. ULOŽ CACHE
-  // ===============================
-  try {
-    fs.writeFileSync(
-      CACHE_FILE,
-      JSON.stringify(webIndex, null, 2)
-    );
-
-    console.log("💾 Cache saved to webIndex.json");
-
-  } catch (err) {
-    console.log("❌ Failed to save cache:", err);
-  }
+  console.log("💾 WEB CACHE SAVED:", webIndex.length);
 }
 
 async function classifyIntent(message) {
@@ -396,72 +498,79 @@ app.post("/api/chat", async (req, res) => {
   try {
 
     const message = req.body.message;
-    const intent = await classifyIntent(message);
-    console.log("INTENT:", intent);
     const lower = message.toLowerCase();
 
-       // 💬 SMALL TALK MODE
-    if (intent === "SMALLTALK") {
-
-       const answer = await askAI(`
-    Jsi přátelský AI chatbot.
-
-    Odpovídej krátce a přirozeně.
-
-    Zpráva:
-    ${message}
-    `);
-       return res.json({
-          answer,
-          sources: []
-       });
-    }
-
-    // 1. krátké zprávy
+    // krátké zprávy
     if (lower.length <= 1) {
       return res.json({
-        answer: "Prosím napište konkrétní dotaz 🙂",
-        sources: []
+        answer: "Prosím napište konkrétní dotaz 🙂"
       });
     }
-    
-    // 2. RAG (TOTO JE HLAVNÍ ČÁST)
-    const relevant = await getRelevantChunks(message, 8);
+
+    // RAG SEARCH
+    const relevant = getRelevantChunks(message, 8);
 
     console.log("===== TOP CHUNKS =====");
 
     relevant.forEach((r, i) => {
       console.log(i, "score:", r.score);
-      console.log(r.text.slice(0, 150));
     });
 
-    // 3. fallback
-    if (!relevant.length || relevant[0].score < 0.25) {
+    // FILTER (DŮLEŽITÉ)
+    const filtered = relevant.filter(r => r.score >= 2);
+
+    if (!filtered.length) {
       return res.json({
-        answer: "V dokumentaci jsem k tomuto dotazu nenašel přesné informace.",
-        sources: []
+        answer: "Nenašel jsem to v dokumentaci."
       });
     }
 
-    // 4. context
-    const context = relevant
-      .map(r => `${r.text} (strana ${r.page})`)
-      .join("\n\n");
+    // LIMIT KONTEKSTU
+    const context = cleanContext(
+      filtered
+        .slice(0, 5)
+        .map(c => c.text)
+        .join("\n\n")
+    );
 
-    // 5. AI
+    // SYSTEM PROMPT (TVRDÝ RAG MODE)
     const answer = await askAI(`
-Použij pouze tento kontext:
+Jsi RAG odpovídač nad dokumentací.
 
+POUŽÍVEJ POUZE KONTEKST NÍŽE.
+NIC NEVYMÝŠLEJ.
+
+====================
+PRAVIDLA
+====================
+
+- odpověď musí být pouze z poskytnutého textu
+- nesmíš přidávat vlastní znalosti
+- nesmíš domýšlet kroky
+- pokud to není v textu → řekni: "Nenašel jsem to v dokumentaci."
+
+====================
+FORMÁT
+====================
+
+Pokud je postup:
+- max 5 kroků
+- každý krok na nový řádek
+- bez opakování
+
+====================
+KONTEKST:
 ${context}
 
-Dotaz: ${message}
-`);
+DOTAZ:
+${message}
+    `);
 
     return res.json({ answer });
 
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -486,11 +595,11 @@ async function startServer() {
       "Xenova/all-MiniLM-L6-v2"
     );
 
-    console.log("Loading PDFs...");
-    await loadDocs();
-
     console.log("Loading web knowledge...");
     await loadWebKnowledge();
+
+    console.log("Loading PDFs...");
+    await loadDocs();
 
     console.log("AI READY");
 
