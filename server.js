@@ -273,7 +273,7 @@ ZÁKAZ OBSAHU
 
 Nikdy nezobrazuj:
 - názvy sekcí
-- názvy kapitol 
+- názvy kapitol
 - účetní účty (např. 311XXX)
 - interní systémové kódy
 - databázová ID
