@@ -193,14 +193,51 @@ body.chat-open #chat-toggle {
 
 /* MOBILE */
 
-@media (max-width: 500px) {
+/* =========================
+   MOBILE FIX
+========================= */
+@media (max-width: 768px) {
 
   #chat-window {
-    width: calc(100% - 20px);
-    height: 80vh;
-
-    right: 10px;
-    bottom: 80px;
+    width: 100vw;
+    height: 100vh;
   }
 
+  /* větší text = čitelné UI */
+  #chat {
+    padding: 10px;
+    gap: 10px;
+  }
+
+  .user-message,
+  .ai-message {
+    max-width: 90%;
+    font-size: 16px;
+    padding: 12px 14px;
+  }
+
+  /* INPUT FIX (VELMI DŮLEŽITÉ) */
+  #msg {
+    font-size: 16px; /* FIX zoom bug */
+    padding: 14px;
+  }
+
+  #send-btn {
+    font-size: 16px;
+    padding: 12px 14px;
+  }
+
+  /* topbar menší, ať neukrajuje prostor */
+  #chat-topbar {
+    font-size: 18px;
+    padding: 14px;
+  }
+
+  #chat-toggle {
+    width: 55px;
+    height: 55px;
+    font-size: 24px;
+    bottom: 15px;
+    right: 15px;
+  }
 }
