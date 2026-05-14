@@ -199,8 +199,9 @@ body.chat-open #chat-toggle {
 @media (max-width: 768px) {
 
   #chat-window {
-    width: 100vw;
     height: 100vh;
+    height: 100dvh; /* moderní fix pro mobily */
+    padding-bottom: env(safe-area-inset-bottom);
   }
 
   /* větší text = čitelné UI */
