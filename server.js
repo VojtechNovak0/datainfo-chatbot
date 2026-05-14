@@ -5,6 +5,8 @@ require("dotenv").config();
 const cheerio = require("cheerio");
 const fs = require("fs");
 
+
+//---------------------------PDF ZDE---------------------
 const pdfUrls = [
   "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-vodne-a-stocne.pdf",
   "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-zalohy.pdf"
