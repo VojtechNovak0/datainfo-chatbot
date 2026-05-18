@@ -5,9 +5,7 @@ require("dotenv").config();
 const cheerio = require("cheerio");
 const fs = require("fs");
 
-
-//---------------------------PDF ZDE---------------------
-const pdfUrls = [
+const knownPDFs = [
   "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-vodne-a-stocne.pdf",
   "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-zalohy.pdf"
 ];
@@ -48,11 +46,19 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 let chunks = [];
 let embedder;
 
+function normalizeText(text) {
+
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
 // ---------------- EMBEDDING ----------------
 async function embed(text) {
   const output = await embedder(text, {
     pooling: "mean",
-    normalize: true
+    normalizeText: true
   });
 
   return Array.from(output.data);
@@ -88,26 +94,10 @@ function splitText(text, size = 500, overlap = 100) {
   return chunks;
 }
 
-function normalize(text) {
-  return text
-    .toLowerCase()
-    .replace(/ě/g, "e")
-    .replace(/š/g, "s")
-    .replace(/č/g, "c")
-    .replace(/ř/g, "r")
-    .replace(/ž/g, "z")
-    .replace(/ý/g, "y")
-    .replace(/á/g, "a")
-    .replace(/í/g, "i")
-    .replace(/é/g, "e")
-    .replace(/ů/g, "u")
-    .replace(/ú/g, "u");
-}
-
 function score(text, query) {
 
-  const t = normalize(text);
-  const q = normalize(query);
+  const t = normalizeText(text);
+  const q = normalizeText(query);
 
   let score = 0;
 
@@ -134,7 +124,7 @@ function score(text, query) {
 
   // bonus za celou frázi
   if (t.includes(q)) {
-    score += 10;
+    score += 20;
   }
 
   return score;
@@ -147,11 +137,18 @@ function cleanContext(text) {
 }
 
 function getRelevantChunks(query, topK = 8) {
-  return chunks
+
+  const all = [
+    ...chunks,
+    ...webIndex
+  ];
+
+  return all
     .map(c => ({
       ...c,
       score: score(c.text, query)
     }))
+    .filter(c => c.score > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, topK);
 }
@@ -197,139 +194,123 @@ async function loadDocs() {
 
   const cached = loadJson(PDF_CACHE_FILE);
 
-  if (cached) {
-    chunks = cached;
+  // cache max 24h
+  if (
+    cached &&
+    cached.timestamp &&
+    Date.now() - cached.timestamp < 1000 * 60 * 60 * 24
+  ) {
+
+    chunks = cached.chunks;
+
     console.log("📦 PDF CACHE LOADED:", chunks.length);
+
     return;
   }
 
   const tempChunks = [];
 
-  for (const url of pdfUrls) {
+  const pdfList = [
+     ...new Set([
+       ...knownPDFs,
+       ...Array.from(discoveredPDFs)
+    ])
+  ];
+
+  console.log("📚 PDFs found:", pdfList.length);
+
+  for (const url of pdfList) {
 
     try {
 
-      console.log("⬇️ Downloading:", url);
+      console.log("⬇️ Downloading PDF:", url);
 
       const pages = await loadPDF(url);
 
       for (const pageData of pages) {
 
-        tempChunks.push({
-          text: pageData.text,
-          source: url,
-          page: pageData.page
-        });
+        const smallerChunks = splitText(pageData.text, 500);
+
+        for (const c of smallerChunks) {
+
+          tempChunks.push({
+            text: c,
+            source: url,
+            page: pageData.page
+          });
+
+        }
 
       }
 
       console.log("✅ PDF indexed:", url);
 
     } catch (err) {
+
       console.log("❌ PDF ERROR:", url);
+
     }
   }
 
   chunks = tempChunks;
 
-  saveJson(PDF_CACHE_FILE, chunks);
+  saveJson(PDF_CACHE_FILE, {
+    timestamp: Date.now(),
+    chunks
+  });
 
   console.log("💾 PDF CACHE SAVED:", chunks.length);
 }
 
 // ---------------- GROQ ----------------
-async function askAI(prompt) {
-  const res = await axios.post(
-    "https://api.groq.com/openai/v1/chat/completions",
-    {
-      model: "llama-3.1-8b-instant",
-      messages: [
-        {
-          role: "system",
-          content: `Jsi AI asistent pro vysvětlování dokumentace.
+async function askAI(message, context) {
 
-========================
-ZÁKLADNÍ PRAVIDLA
-========================
+  const systemPrompt = `
+Jsi AI asistent pro firemní dokumentaci.
 
-- odpovídej jasně a lidsky, ne citací bodů
-- pokud najdeš relevantní sekci, vysvětli ji jako postup
-- nikdy nevracej jen číslo bodu nebo název sekce
-- ignoruj nadpisy jako odpověď
+PRAVIDLA:
+- odpovídej stručně a přirozeně
+- pokud máš kontext, použij ho
+- pokud nemáš kontext, odpovídej obecně
+- nikdy nepiš "nemám kontext"
+- max 6 vět
+- postupy piš jenom v bodech
+- každý bod bude očíslovaný
+`;
 
-========================
-FORMÁT ODPOVĚDI
-========================
+  const userContent = context
+    ? `KONTEKST:\n${context}\n\nDOTAZ:\n${message}`
+    : `DOTAZ:\n${message}`;
 
-Pokud jde o postup:
-
-1. krátké vysvětlení (max 1–2 věty)
-2. kroky (max 5)
-3. žádné opakování informací
-
-Každý krok musí být na nový řádek a začínat číslem.
-
-========================
-ZÁKAZ OBSAHU
-========================
-
-Nikdy nezobrazuj:
-- názvy sekcí
-- názvy kapitol 
-- účetní účty (např. 311XXX)
-- interní systémové kódy
-- databázová ID
-- IP adresy
-- technické implementační detaily
-
-Pokud se objeví v kontextu:
-→ úplně je ignoruj
-→ nevysvětluj je
-→ nepoužívej je v odpovědi
-
-========================
-LOGIKA ODPOVĚDI
-========================
-
-- odpověď musí být pouze z poskytnutého kontextu
-- pokud informace chybí:
-  "Nenašel jsem to v dokumentaci."
-
-========================
-ZÁKAZ DUPLIKACE
-========================
-
-- nikdy neopakuj stejnou informaci
-- žádné dvojité postupy
-- žádné redundantní věty
-`
-        },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.2
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
-        "Content-Type": "application/json"
+  try {
+    const res = await axios.post(
+      "https://api.groq.com/openai/v1/chat/completions",
+      {
+        model: "llama-3.1-8b-instant",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userContent }
+        ],
+        temperature: 0.2
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${GROQ_API_KEY}`,
+          "Content-Type": "application/json"
+        }
       }
+    );
+
+    return res.data.choices[0].message.content;
+
+  } catch (err) {
+
+    if (err.response?.status === 429) {
+      return "Server je přetížený, zkus to za chvíli 🙂";
     }
-  );
 
-  return res.data.choices[0].message.content;
-}
-
-async function fetchPage(url) {
-  const res = await fetch(url);
-  const html = await res.text();
-
-  const $ = cheerio.load(html);
-
-  $("script, style, nav, footer, header, noscript").remove();
-
-  const text = $("body").text().replace(/\s+/g, " ").trim();
-
-  return text;
+    throw err;
+  }
 }
 
 function extractLinks($) {
@@ -364,16 +345,6 @@ function extractLinks($) {
     link.includes("help.datainfo.cz") ||
     link.includes(".pdf")
   );
-}
-
-function splitText(text, size = 800) {
-  const chunks = [];
-
-  for (let i = 0; i < text.length; i += size) {
-    chunks.push(text.slice(i, i + size));
-  }
-
-  return chunks;
 }
 
 async function crawl(url) {
@@ -426,73 +397,142 @@ async function loadWebKnowledge() {
 
   const cached = loadJson(WEB_CACHE_FILE);
 
-  if (cached) {
-    webIndex = cached;
+  // cache 12 hodin
+  if (
+    cached &&
+    cached.timestamp &&
+    Date.now() - cached.timestamp < 1000 * 60 * 60 * 12
+  ) {
+
+    webIndex = cached.pages;
+
     console.log("📦 WEB CACHE LOADED:", webIndex.length);
+
     return;
   }
+
+  console.log("🌐 Refreshing web knowledge...");
 
   webIndex = [];
   visited.clear();
 
   await crawl(BASE_URL);
 
-  saveJson(WEB_CACHE_FILE, webIndex);
+  saveJson(WEB_CACHE_FILE, {
+    timestamp: Date.now(),
+    pages: webIndex
+  });
 
   console.log("💾 WEB CACHE SAVED:", webIndex.length);
 }
 
-async function classifyIntent(message) {
+function classifyIntent(message) {
 
-  const res = await axios.post(
+  const lower = normalizeText(message);
+
+  // ======================
+  // SMALLTALK
+  // ======================
+
+  const smalltalk = [
+  "ahoj",
+  "cau",
+  "cus",
+  "ok",
+  "okay",
+  "diky",
+  "dekuji",
+  "jak se mas",
+  "co ty",
+  "a ty",
+  "aha",
+  "super",
+  "fajn",
+  "jasne",
+  "jo"
+];
+
+  if (smalltalk.some(w => lower.includes(w))) {
+    return {
+      intent: "smalltalk"
+    };
+  }
+
+  // ======================
+  // RAG DOTAZY
+  // ======================
+
+  const ragWords = [
+  "jak",
+  "kde",
+  "co",
+  "nastavit",
+  "vytvorit",
+  "pridat",
+  "sipo",
+  "faktura",
+  "zaloh",
+  "odberatel",
+  "vodomer",
+  "platba",
+  "odecet",
+  "aplikace"
+];
+
+  if (ragWords.some(w => lower.includes(w))) {
+    return {
+      intent: "rag"
+    };
+  }
+
+  // ======================
+  // FALLBACK AI
+  // ======================
+
+  return {
+    intent: "fallback"
+  };
+}
+
+async function askSmalltalkAI(message) {
+
+  const response = await axios.post(
     "https://api.groq.com/openai/v1/chat/completions",
     {
       model: "llama-3.1-8b-instant",
+      max_tokens: 40,
+      temperature: 0.7,
+
       messages: [
         {
           role: "system",
           content: `
-Rozhodni typ zprávy.
+Jsi přátelský chatbot.
 
-Možnosti:
-- SMALLTALK
-- DOCUMENT
-
-SMALLTALK:
-- pozdravy
-- běžná konverzace
-- poděkování
-- krátké lidské reakce
-- otázky typu "co ty"
-
-DOCUMENT:
-- otázky na dokumentaci
-- návody
-- postupy
-- technické dotazy
-
-Odpověz POUZE jedním slovem:
-SMALLTALK
-nebo
-DOCUMENT
+Pravidla:
+- odpovídej krátce
+- maximálně 1 věta
+- buď přirozený
+- můžeš být lehce vtipný
+- odpovídej česky
+- NEpiš dlouhé odpovědi
 `
         },
         {
           role: "user",
           content: message
         }
-      ],
-      temperature: 0
+      ]
     },
     {
       headers: {
-        Authorization: `Bearer ${GROQ_API_KEY}`,
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
         "Content-Type": "application/json"
       }
     }
   );
 
-  return res.data.choices[0].message.content.trim();
+  return response.data.choices[0].message.content;
 }
 
 // ---------------- API ----------------
@@ -500,79 +540,57 @@ app.post("/api/chat", async (req, res) => {
   try {
 
     const message = req.body.message;
-    const lower = message.toLowerCase();
+    const intent = classifyIntent(message);
 
-    // krátké zprávy
-    if (lower.length <= 1) {
-      return res.json({
-        answer: "Prosím napište konkrétní dotaz 🙂"
-      });
+    console.log("INTENT:", intent.intent);
+
+    // ======================
+    // 1) SMALLTALK (NO AI)
+    // ======================
+    if (intent.intent === "smalltalk") {
+
+  const answer = await askSmalltalkAI(message);
+
+  return res.json({
+    answer
+  });
+}
+
+    // ======================
+    // 2) RAG (AI + DOCS)
+    // ======================
+    if (intent.intent === "rag") {
+
+      const relevant = getRelevantChunks(message, 8) || [];
+
+      const context = relevant.length
+         ? relevant
+            .slice(0, 3)
+            .map(r => r.text.slice(0, 500))
+            .join("\n\n")
+         : "";
+
+      const answer = await askAI(message, context);
+
+      return res.json({ answer });
     }
 
-    // RAG SEARCH
-    const relevant = getRelevantChunks(message, 8);
+    // ======================
+    // 3) FALLBACK (AI ONLY)
+    // ======================
+    if (intent.intent === "fallback") {
 
-    console.log("===== TOP CHUNKS =====");
+      const answer = await askAI(message, null);
 
-    relevant.forEach((r, i) => {
-      console.log(i, "score:", r.score);
-    });
-
-    // FILTER (DŮLEŽITÉ)
-    const filtered = relevant.filter(r => r.score >= 2);
-
-    if (!filtered.length) {
-      return res.json({
-        answer: "Nenašel jsem to v dokumentaci."
-      });
+      return res.json({ answer });
     }
-
-    // LIMIT KONTEKSTU
-    const context = cleanContext(
-      filtered
-        .slice(0, 5)
-        .map(c => c.text)
-        .join("\n\n")
-    );
-
-    // SYSTEM PROMPT (TVRDÝ RAG MODE)
-    const answer = await askAI(`
-Jsi RAG odpovídač nad dokumentací.
-
-POUŽÍVEJ POUZE KONTEKST NÍŽE.
-NIC NEVYMÝŠLEJ.
-
-====================
-PRAVIDLA
-====================
-
-- odpověď musí být pouze z poskytnutého textu
-- nesmíš přidávat vlastní znalosti
-- nesmíš domýšlet kroky
-- pokud to není v textu → řekni: "Nenašel jsem to v dokumentaci."
-
-====================
-FORMÁT
-====================
-
-Pokud je postup:
-- max 5 kroků
-- každý krok na nový řádek
-- bez opakování
-
-====================
-KONTEKST:
-${context}
-
-DOTAZ:
-${message}
-    `);
-
-    return res.json({ answer });
 
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: err.message });
+
+    return res.json({
+      answer: "Nastala chyba při komunikaci se serverem."
+    });
   }
 });
 
