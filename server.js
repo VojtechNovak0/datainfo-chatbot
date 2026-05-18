@@ -1,21 +1,32 @@
 const express = require("express");
 const axios = require("axios");
-const pdfjsLib = require("pdfjs-dist/legacy/build/pdf.js");
 require("dotenv").config();
 const cheerio = require("cheerio");
 const fs = require("fs");
+const pdfParse = require("pdf-parse");
+
 
 const knownPDFs = [
-  "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-vodne-a-stocne.pdf",
-  "http://erp.oznameni.datainfo.cz/wp-content/uploads/2024/09/Datainfo-Jak-na-zalohy.pdf"
+  "http://erp.oznameni.datainfo.cz//wp-content/uploads/2024/09/Datainfo-Jak-na-zalohy.pdf",
+  "http://erp.oznameni.datainfo.cz//wp-content/uploads/2024/09/Datainfo-Jak-na-vodne-a-stocne.pdf"
 ];
-
+const CHAT_LOG_FILE = "./chatLogs.json";
 const WEB_CACHE_FILE = "./webIndex.json";
 const PDF_CACHE_FILE = "./pdfIndex.json";
 const BASE_URL = "https://help.datainfo.cz";
-const MAX_PAGES = 20;
+const MAX_PAGES = 25;
 let discoveredPDFs = new Set();
 let pipeline;
+
+let webIndex = [];
+let visited = new Set();
+
+let docsLoaded = false;
+
+let chunks = [];
+let embedder;
+let embeddedChunks = [];
+const queryEmbeddingCache = {};
 
 async function loadEmbedder() {
   const transformers = await import("@xenova/transformers");
@@ -34,17 +45,29 @@ function saveJson(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-let webIndex = [];
-let visited = new Set();
+function saveChatLog(data) {
+
+  let logs = [];
+
+  try {
+    logs = JSON.parse(
+      fs.readFileSync(CHAT_LOG_FILE, "utf8")
+    );
+  } catch {}
+
+  logs.push(data);
+
+  fs.writeFileSync(
+    CHAT_LOG_FILE,
+    JSON.stringify(logs, null, 2)
+  );
+}
 
 const app = express();
 app.use(express.json());
 app.use(express.static("public"));
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-
-let chunks = [];
-let embedder;
 
 function normalizeText(text) {
 
@@ -56,12 +79,76 @@ function normalizeText(text) {
 
 // ---------------- EMBEDDING ----------------
 async function embed(text) {
-  const output = await embedder(text, {
+  const out = await embedder(text, {
     pooling: "mean",
-    normalizeText: true
+    normalize: true
   });
 
-  return Array.from(output.data);
+  return Array.from(out.data);
+}
+
+function cosineSim(a, b) {
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+}
+
+async function buildEmbeddings() {
+  console.log("🧠 Building embeddings...");
+
+  if (!chunks || chunks.length === 0) {
+    console.log("⚠️ No chunks found, skipping embeddings");
+    return;
+  }
+
+  const embedded = [];
+
+  for (const chunk of chunks) {
+    try {
+      const vector = await embed(chunk.text);
+
+      embedded.push({
+        ...chunk,
+        embedding: vector
+      });
+
+    } catch (err) {
+      console.log("❌ Embedding failed for chunk");
+    }
+  }
+
+  embeddedChunks = embedded;
+  chunks = embedded;
+
+  console.log("✅ Embeddings ready:", chunks.length);
+
+  saveJson(PDF_CACHE_FILE, {
+    timestamp: Date.now(),
+    chunks
+  });
+
+  console.log("💾 Embeddings saved to cache");
+}
+
+async function getRelevantChunks(query, topK = 5) {
+
+  const qVec = await embed(query);
+
+  return embeddedChunks
+    .map(c => ({
+      ...c,
+      score: cosine(qVec, c.embedding)
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, topK);
 }
 
 // ---------------- COSINE ----------------
@@ -79,55 +166,14 @@ function cosine(a, b) {
   return dot / (Math.sqrt(magA) * Math.sqrt(magB));
 }
 
-function splitText(text, size = 500, overlap = 100) {
-
+function splitText(text, size = 800, overlap = 150) {
   const chunks = [];
 
   for (let i = 0; i < text.length; i += size - overlap) {
-
-    chunks.push(
-      text.slice(i, i + size)
-    );
-
+    chunks.push(text.slice(i, i + size));
   }
 
   return chunks;
-}
-
-function score(text, query) {
-
-  const t = normalizeText(text);
-  const q = normalizeText(query);
-
-  let score = 0;
-
-  const queryWords = q
-    .split(/\s+/)
-    .filter(w => w.length > 2);
-
-  for (const word of queryWords) {
-
-    // přesná shoda
-    if (t.includes(word)) {
-      score += 3;
-    }
-
-    // částečná shoda
-    if (
-      word.length >= 4 &&
-      t.includes(word.slice(0, 4))
-    ) {
-      score += 1;
-    }
-
-  }
-
-  // bonus za celou frázi
-  if (t.includes(q)) {
-    score += 20;
-  }
-
-  return score;
 }
 
 function cleanContext(text) {
@@ -136,130 +182,105 @@ function cleanContext(text) {
     .replace(/Systém integrované platební operace/g, "SIPO");
 }
 
-function getRelevantChunks(query, topK = 8) {
-
-  const all = [
-    ...chunks,
-    ...webIndex
-  ];
-
-  return all
-    .map(c => ({
-      ...c,
-      score: score(c.text, query)
-    }))
-    .filter(c => c.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
-}
-
 // ---------------- PDF LOADER (PAGE BASED) ----------------
 async function loadPDF(url) {
+  try {
+    console.log("⬇️ DOWNLOADING:", url);
 
-  const response = await axios.get(url, {
-    responseType: "arraybuffer"
-  });
-
-  const data = new Uint8Array(response.data);
-
-  const pdf = await pdfjsLib
-    .getDocument({ data })
-    .promise;
-
-  const pages = [];
-
-  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-
-    const page = await pdf.getPage(pageNum);
-
-    const content = await page.getTextContent();
-
-    const text = content.items
-      .map(item => item.str)
-      .join(" ");
-
-    pages.push({
-      text,
-      page: pageNum
+    const response = await axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 30000,
+      headers: {
+        "User-Agent": "Mozilla/5.0"
+      }
     });
-  }
 
-  return pages;
+    console.log("📦 DOWNLOAD SIZE:", response.data.length);
+
+    const buffer = Buffer.from(response.data);
+
+    const pdfParse = require("pdf-parse");
+
+    const data = await pdfParse(buffer);
+
+    console.log("📄 PDF TEXT LENGTH:", data.text?.length);
+
+    return [{
+      text: data.text,
+      page: 1
+    }];
+
+  } catch (err) {
+    console.log("❌ PDF LOAD FAILED:", url);
+
+    console.log("FULL ERROR:");
+    console.log(err); // <- TOTO JE KLÍČ
+
+    return [];
+  }
 }
 
 // ---------------- LOAD DOCS ----------------
 async function loadDocs() {
-
-  console.log("📄 Loading PDFs...");
-
-  const cached = loadJson(PDF_CACHE_FILE);
-
-  // cache max 24h
-  if (
-    cached &&
-    cached.timestamp &&
-    Date.now() - cached.timestamp < 1000 * 60 * 60 * 24
-  ) {
-
-    chunks = cached.chunks;
-
-    console.log("📦 PDF CACHE LOADED:", chunks.length);
-
+  if (docsLoaded) {
+    console.log("⚠️ loadDocs already executed, skipping");
     return;
   }
 
-  const tempChunks = [];
+  docsLoaded = true;
+  console.log("📄 Loading PDFs...");
+  
+  const cached = loadJson(PDF_CACHE_FILE);
+  
+  if (cached?.chunks?.length > 0) {
+
+     chunks = cached.chunks;
+     embeddedChunks = cached.chunks;
+
+     console.log("📦 PDF CACHE LOADED:", chunks.length);
+
+     return;
+  }
 
   const pdfList = [
-     ...new Set([
-       ...knownPDFs,
-       ...Array.from(discoveredPDFs)
+    ...new Set([
+      ...knownPDFs,
+      ...Array.from(discoveredPDFs)
     ])
   ];
 
   console.log("📚 PDFs found:", pdfList.length);
 
+  const tempChunks = [];
+
   for (const url of pdfList) {
-
     try {
-
-      console.log("⬇️ Downloading PDF:", url);
+      console.log("⬇️ PDF:", url);
 
       const pages = await loadPDF(url);
 
-      for (const pageData of pages) {
+      for (const p of pages) {
 
-        const smallerChunks = splitText(pageData.text, 500);
+        const parts = splitText(p.text, 500);
 
-        for (const c of smallerChunks) {
-
+        for (const c of parts) {
           tempChunks.push({
             text: c,
             source: url,
-            page: pageData.page
+            page: p.page
           });
-
         }
-
       }
 
-      console.log("✅ PDF indexed:", url);
-
-    } catch (err) {
-
-      console.log("❌ PDF ERROR:", url);
-
+    } catch (e) {
+      console.log("❌ PDF error:", url);
     }
   }
 
   chunks = tempChunks;
 
-  saveJson(PDF_CACHE_FILE, {
-    timestamp: Date.now(),
-    chunks
-  });
-
-  console.log("💾 PDF CACHE SAVED:", chunks.length);
+  console.log("💾 PDF SAVED:", chunks.length);
+  console.log("PDF LIST:", pdfList);
 }
 
 // ---------------- GROQ ----------------
@@ -269,12 +290,15 @@ async function askAI(message, context) {
 Jsi AI asistent pro firemní dokumentaci.
 
 PRAVIDLA:
-- odpovídej stručně a přirozeně
-- pokud máš kontext, použij ho
-- pokud nemáš kontext, odpovídej obecně
-- nikdy nepiš "nemám kontext"
+- odpovídej POUZE z kontextu
+- pokud je v kontextu odpověď, MUSÍŠ ji použít
+- pokud je odpověď částečně v kontextu, slož ji z něj
+- nikdy neříkej, že informace není v dokumentaci, pokud je v kontextu
+- pokud kontext neobsahuje žádnou relevantní informaci, odpověz: "V dokumentaci to není uvedeno"
+- NEvymýšlej žádné kroky ani menu
+- pokud kontext obsahuje postup, kopíruj ho co nejpřesněji
 - max 6 vět
-- postupy piš jenom v bodech
+- postupy piš jen v bodech
 - každý bod bude očíslovaný
 `;
 
@@ -373,12 +397,22 @@ async function crawl(url) {
 
     const text = $("body").text().replace(/\s+/g, " ").trim();
 
-    const chunks = splitText(text, 800);
+    const chunks = splitText(text, 200);
 
+    console.log("CHUNKS:", chunks.length);
+    
+    const vector = await embed(c);
+    
     for (const c of chunks) {
       webIndex.push({
         text: c,
-        url
+        url,
+        embedding: vector
+      });
+      embeddedChunks.push({
+        text: c,
+        source: url,
+        embedding: vector
       });
     }
 
@@ -550,7 +584,16 @@ app.post("/api/chat", async (req, res) => {
     if (intent.intent === "smalltalk") {
 
   const answer = await askSmalltalkAI(message);
-
+  
+  saveChatLog({
+     time: new Date().toLocaleString("cs-CZ", {
+        timeZone: "Europe/Prague"
+     }),
+     ip: req.ip,
+     question: message,
+     answer
+  });
+  
   return res.json({
     answer
   });
@@ -561,19 +604,30 @@ app.post("/api/chat", async (req, res) => {
     // ======================
     if (intent.intent === "rag") {
 
-      const relevant = getRelevantChunks(message, 8) || [];
+  let relevant = await getRelevantChunks(message, 5);
 
-      const context = relevant.length
-         ? relevant
-            .slice(0, 3)
-            .map(r => r.text.slice(0, 500))
-            .join("\n\n")
-         : "";
+  console.log("RELEVANT:", relevant.map(r => r.score));
 
-      const answer = await askAI(message, context);
+  const context = relevant
+    .filter(r => r.score > 0.25)
+    .map(r => r.text)
+    .join("\n\n");
 
-      return res.json({ answer });
-    }
+  console.log("CONTEXT LENGTH:", context.length);
+
+  const answer = await askAI(message, context || null);
+
+  saveChatLog({
+     time: new Date().toLocaleString("cs-CZ", {
+        timeZone: "Europe/Prague"
+     }),
+     ip: req.ip,
+     question: message,
+     answer
+  });
+
+  return res.json({ answer });
+}
 
     // ======================
     // 3) FALLBACK (AI ONLY)
@@ -581,6 +635,15 @@ app.post("/api/chat", async (req, res) => {
     if (intent.intent === "fallback") {
 
       const answer = await askAI(message, null);
+
+      saveChatLog({
+         time: new Date().toLocaleString("cs-CZ", {
+            timeZone: "Europe/Prague"
+         }),
+         ip: req.ip,
+         question: message,
+         answer
+      });
 
       return res.json({ answer });
     }
@@ -620,6 +683,7 @@ async function startServer() {
 
     console.log("Loading PDFs...");
     await loadDocs();
+    await buildEmbeddings();
 
     console.log("AI READY");
 
