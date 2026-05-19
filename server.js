@@ -27,6 +27,7 @@ let chunks = [];
 let embedder;
 let embeddedChunks = [];
 const queryEmbeddingCache = {};
+const queryCacheTTL = 1000 * 60 * 60; // 1 hodina
 const embeddingCache = {};
 
 let aiReady = false;
@@ -77,17 +78,19 @@ app.use(express.static("public"));
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 function normalizeText(text) {
-
   return text
     .toLowerCase()
+    .trim()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "");
 }
 
 // ---------------- EMBEDDING ----------------
 async function embed(text) {
-  if (embeddingCache[text]) {
-    return embeddingCache[text];
+  const key = normalizeText(text);
+
+  if (embeddingCache[key]) {
+    return embeddingCache[key];
   }
 
   const out = await embedder(text, {
@@ -96,7 +99,7 @@ async function embed(text) {
   });
 
   const vec = Array.from(out.data);
-  embeddingCache[text] = vec;
+  embeddingCache[key] = vec;
 
   return vec;
 }
@@ -154,8 +157,34 @@ async function buildEmbeddings() {
 
 async function getRelevantChunks(query, topK = 5) {
 
+  const key = normalizeText(query);
+  const now = Date.now();
+
+  // 1) CACHE HIT
+  if (
+    queryEmbeddingCache[key] &&
+    (now - queryEmbeddingCache[key].timestamp < queryCacheTTL)
+  ) {
+    const qVec = queryEmbeddingCache[key].vector;
+
+    return embeddedChunks
+      .map(c => ({
+        ...c,
+        score: cosine(qVec, c.embedding)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+  }
+
+  // 2) NOVÝ EMBEDDING
   try {
     const qVec = await embed(query);
+
+    // uložit do cache
+    queryEmbeddingCache[key] = {
+      vector: qVec,
+      timestamp: now
+    };
 
     return embeddedChunks
       .map(c => ({
@@ -166,7 +195,7 @@ async function getRelevantChunks(query, topK = 5) {
       .slice(0, topK);
 
   } catch (err) {
-    console.log("RAG fallback:", err.message);
+    console.log("RAG error:", err.message);
     return [];
   }
 }
@@ -598,11 +627,8 @@ Pravidla:
   return response.data.choices[0].message.content;
 }
 
-app.get("/status", (req, res) => {
-  res.json({
-    aiReady,
-    phase: aiBootPhase
-  });
+app.get("/health", (req, res) => {
+  res.status(200).send("ok");
 });
 
 // ---------------- API ----------------
@@ -610,7 +636,9 @@ app.post("/api/chat", async (req, res) => {
   try {
 
     const message = req.body.message;
-    
+
+    let ragTimeout = false;
+
     if (!aiReady) {
         const intent = classifyIntent(message);
 
@@ -656,6 +684,14 @@ app.post("/api/chat", async (req, res) => {
     // ======================
     if (intent.intent === "rag") {
 
+  if (ragTimeout) {
+     const answer = await askAI(message, null);
+     return res.json({ answer });
+  }
+  
+  ragTimeout = true;
+  setTimeout(() => ragTimeout = false, 2000);
+
   let relevant = await getRelevantChunks(message, 5);
   
   if (!relevant.length) {
@@ -666,7 +702,7 @@ app.post("/api/chat", async (req, res) => {
   console.log("RELEVANT:", relevant.map(r => r.score));
 
   const context = relevant
-    .filter(r => r.score > 0.3)
+    .filter(r => r.score > 0.25)
     .map(r => r.text)
     .join("\n\n");
 
