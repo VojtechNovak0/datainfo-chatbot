@@ -16,5 +16,29 @@
     "ip": "::1",
     "question": "jak zjistím stav záloh k datu?",
     "answer": "Jděte do Vodné a Stočné / Fakturace / Zálohy / Prohlížení záloh a zvolte Stav záloh k datu."
+  },
+  {
+    "time": "19. 5. 2026 11:39:41",
+    "ip": "::1",
+    "question": "čau",
+    "answer": "Čau! Jak se máš?"
+  },
+  {
+    "time": "19. 5. 2026 11:39:51",
+    "ip": "::1",
+    "question": "jak zjistím stav záloh k datu?",
+    "answer": "V dokumentaci je popsáno, jak zkontrolovat úhrady záloh pro konkrétní odběrné místo. Jděte do Vodné a Stočné / Číselníky / Nahrávání odběrných míst, najděte odběrné místo a v detailu odběrného místa v pravé části zvolte Zobrazit zálohy. Zobrazí se vám položky záloh k danému odběrnému místu včetně informace, které zálohy byly uhrazeny, případně kdy, a zda byly již zúčtovány."
+  },
+  {
+    "time": "19. 5. 2026 11:41:50",
+    "ip": "::1",
+    "question": "čau",
+    "answer": "Čau, jak se máš?"
+  },
+  {
+    "time": "19. 5. 2026 11:41:56",
+    "ip": "::1",
+    "question": "jak zjistím stav záloh k datu?",
+    "answer": "Zjistíte stav záloh k datu tak, že jdete do Vodné a Stočné / Fakturace / Zálohy / Prohlížení záloh a zvolíte Stav záloh k datu."
   }
 ]

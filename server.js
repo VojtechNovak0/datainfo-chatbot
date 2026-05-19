@@ -27,6 +27,7 @@ let chunks = [];
 let embedder;
 let embeddedChunks = [];
 const queryEmbeddingCache = {};
+const embeddingCache = {};
 
 let aiReady = false;
 let webReady = false;
@@ -85,12 +86,19 @@ function normalizeText(text) {
 
 // ---------------- EMBEDDING ----------------
 async function embed(text) {
+  if (embeddingCache[text]) {
+    return embeddingCache[text];
+  }
+
   const out = await embedder(text, {
     pooling: "mean",
     normalize: true
   });
 
-  return Array.from(out.data);
+  const vec = Array.from(out.data);
+  embeddingCache[text] = vec;
+
+  return vec;
 }
 
 function cosineSim(a, b) {
@@ -146,15 +154,21 @@ async function buildEmbeddings() {
 
 async function getRelevantChunks(query, topK = 5) {
 
-  const qVec = await embed(query);
+  try {
+    const qVec = await embed(query);
 
-  return embeddedChunks
-    .map(c => ({
-      ...c,
-      score: cosine(qVec, c.embedding)
-    }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+    return embeddedChunks
+      .map(c => ({
+        ...c,
+        score: cosine(qVec, c.embedding)
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, topK);
+
+  } catch (err) {
+    console.log("RAG fallback:", err.message);
+    return [];
+  }
 }
 
 // ---------------- COSINE ----------------
@@ -643,11 +657,16 @@ app.post("/api/chat", async (req, res) => {
     if (intent.intent === "rag") {
 
   let relevant = await getRelevantChunks(message, 5);
+  
+  if (!relevant.length) {
+     const answer = await askAI(message, null);
+     return res.json({ answer });
+  }
 
   console.log("RELEVANT:", relevant.map(r => r.score));
 
   const context = relevant
-    .filter(r => r.score > 0.25)
+    .filter(r => r.score > 0.3)
     .map(r => r.text)
     .join("\n\n");
 
