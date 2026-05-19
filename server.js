@@ -28,6 +28,12 @@ let embedder;
 let embeddedChunks = [];
 const queryEmbeddingCache = {};
 
+let aiReady = false;
+let webReady = false;
+let pdfReady = false;
+
+let aiBootPhase = "starting";
+
 async function loadEmbedder() {
   const transformers = await import("@xenova/transformers");
   pipeline = transformers.pipeline;
@@ -233,13 +239,14 @@ async function loadDocs() {
   const cached = loadJson(PDF_CACHE_FILE);
   
   if (cached?.chunks?.length > 0) {
-
      chunks = cached.chunks;
+
+     // DŮLEŽITÉ:
      embeddedChunks = cached.chunks;
 
      console.log("📦 PDF CACHE LOADED:", chunks.length);
 
-     return;
+     return true; // <- přidej return TRUE
   }
 
   const pdfList = [
@@ -378,8 +385,12 @@ async function crawl(url) {
   visited.add(url);
 
   try {
-    const res = await fetch(url);
-    const html = await res.text();
+    const res = await axios.get(url, {
+       timeout: 15000,
+       headers: { "User-Agent": "Mozilla/5.0" }
+    });
+
+    const html = res.data;
 
     const $ = cheerio.load(html);
          // PDF regex detection
@@ -399,21 +410,14 @@ async function crawl(url) {
 
     const chunks = splitText(text, 200);
 
-    console.log("CHUNKS:", chunks.length);
-    
-    const vector = await embed(c);
-    
     for (const c of chunks) {
-      webIndex.push({
-        text: c,
-        url,
-        embedding: vector
-      });
-      embeddedChunks.push({
-        text: c,
-        source: url,
-        embedding: vector
-      });
+       const vector = await embed(c);
+
+       webIndex.push({
+          text: c,
+          url,
+          embedding: vector
+       });
     }
 
     const links = extractLinks($);
@@ -423,7 +427,10 @@ async function crawl(url) {
     }
 
   } catch (e) {
-    console.log("crawl error:", url);
+       console.log("❌ CRAWL FAILED:", url);
+       console.log("❌ ERROR NAME:", e.name);
+       console.log("❌ ERROR MESSAGE:", e.message);
+       console.log("❌ FULL:", e);
   }
 }
 
@@ -433,16 +440,23 @@ async function loadWebKnowledge() {
 
   // cache 12 hodin
   if (
-    cached &&
-    cached.timestamp &&
-    Date.now() - cached.timestamp < 1000 * 60 * 60 * 12
+      cached &&
+      cached.pages &&
+      Array.isArray(cached.pages) &&
+      cached.pages.length > 0 &&
+      cached.timestamp &&
+      Date.now() - cached.timestamp < 1000 * 60 * 60 * 12
   ) {
 
-    webIndex = cached.pages;
+     webIndex = cached.pages;
+     embeddedChunks = cached.pages.map(p => ({
+        ...p,
+        embedding: p.embedding || []
+     }));
 
-    console.log("📦 WEB CACHE LOADED:", webIndex.length);
+     console.log("📦 WEB CACHE LOADED:", webIndex.length);
 
-    return;
+     return;
   }
 
   console.log("🌐 Refreshing web knowledge...");
@@ -458,6 +472,7 @@ async function loadWebKnowledge() {
   });
 
   console.log("💾 WEB CACHE SAVED:", webIndex.length);
+  webReady = true;
 }
 
 function classifyIntent(message) {
@@ -569,11 +584,34 @@ Pravidla:
   return response.data.choices[0].message.content;
 }
 
+app.get("/status", (req, res) => {
+  res.json({
+    aiReady,
+    phase: aiBootPhase
+  });
+});
+
 // ---------------- API ----------------
 app.post("/api/chat", async (req, res) => {
   try {
 
     const message = req.body.message;
+    
+    if (!aiReady) {
+        const intent = classifyIntent(message);
+
+        // SMALLTALK funguje hned
+        if (intent.intent === "smalltalk") {
+           const answer = await askSmalltalkAI(message);
+           return res.json({ answer });
+        }
+
+        // rychlá fallback odpověď
+        return res.json({
+           answer: "⚡ Systém se načítá, ale už můžeš psát — odpovím hned jak bude AI plně ready."
+        });
+    }
+
     const intent = classifyIntent(message);
 
     console.log("INTENT:", intent.intent);
@@ -659,36 +697,47 @@ app.post("/api/chat", async (req, res) => {
 
 // ---------------- START ----------------
 async function startServer() {
-
   const PORT = process.env.PORT || 3000;
 
   app.listen(PORT, () => {
     console.log("Server running on port", PORT);
   });
 
+  console.log("⚡ Server started instantly");
+
+  setTimeout(() => {
+      initAI();
+  }, 0);
+}
+
+async function initAI() {
   try {
+    console.log("🧠 Loading AI in background...");
+    aiBootPhase = "loading_embedder";
 
-    console.log("Loading transformers...");
-    await loadEmbedder(); // ← DŮLEŽITÉ
-
-    console.log("Loading embedder model...");
+    await loadEmbedder();
 
     embedder = await pipeline(
       "feature-extraction",
       "Xenova/all-MiniLM-L6-v2"
     );
 
-    console.log("Loading web knowledge...");
+    aiBootPhase = "loading_web";
     await loadWebKnowledge();
 
-    console.log("Loading PDFs...");
+    aiBootPhase = "loading_pdf";
     await loadDocs();
+
+    aiBootPhase = "building_embeddings";
     await buildEmbeddings();
 
-    console.log("AI READY");
+    aiReady = true;
+    aiBootPhase = "ready";
 
+    console.log("✅ AI READY");
   } catch (err) {
-    console.error(err);
+    console.error("❌ AI init failed:", err);
+    aiBootPhase = "error";
   }
 }
 
